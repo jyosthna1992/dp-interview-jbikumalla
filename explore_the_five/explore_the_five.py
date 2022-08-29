@@ -34,12 +34,52 @@ download. In the original archive, there is also a file named
 import hashlib
 import os
 from datetime import datetime
+import mysql.connector
+import requests
+import zipfile
+import csv
 
-REQUIRES = ""
 
-# TODO: Update DBPARAMS here to set up the database connection
-DBPARAMS = {
-    }
+class Task:
+
+    def __init__(self, dt: datetime):
+        self.start_time = dt
+        self.results = None
+
+    def run(self, *args):
+        raise Exception("Raising an exception")
+
+    def __eq__(self, other):
+        if not isinstance(other, Task):
+            return NotImplemented
+
+        return self.start_time == other.start_time
+
+
+class ListSum(Task):
+
+    def __init__(self, dt: datetime):
+        super().__init__(dt)
+
+    def run(self, *args):
+        self.results = sum(args)
+
+
+class ListAverage(Task):
+
+    def __init__(self, dt: datetime):
+        super().__init__(dt)
+
+    def run(self, *args):
+        self.results = sum(args)/len(args)
+
+
+
+REQUIRES = "mysql-connector-python==8.0.30, requests=2.28.1"
+
+DBPARAMS = {"host": "localhost",
+            "user": "root",
+            "password": ""}
 
 COLUMN_DEFINITIONS = [
     ("ext1", "int"),
@@ -162,7 +202,7 @@ def compare_results(resultfilename: str) -> bool:
 
     """
     return open(resultfilename).read() == \
-        open(f"{resultfilename}-correct").read()
+           open(f"{resultfilename}-correct").read()
 
 
 def shasum(filename: str) -> str:
@@ -180,18 +220,23 @@ def shasum(filename: str) -> str:
     return digest.hexdigest()
 
 
-def download_zip(url: str, zipfilename: str) -> None:
+def download_zip(url: str, zipfilename: str) -> bool:
     """This function is expected to retrieve the zip file from the
     specified URL, and store that zip file in the current
     directory. It will fail if the output filename does not exist
 
     """
-    # TODO: retrieve the file and save to disk in the current
-    # directory. Note: This file is 160M
 
-    assert os.path.exists(zipfilename)
-    assert shasum(zipfilename) == \
-        'd19ca933d974c371a48896c7dce61c005780953c21fe88bb9a95382d8ef22904'
+    head_response = requests.head(url)
+    if head_response.status_code == 200:
+        response = requests.get(url, allow_redirects=True)
+        with open(zipfilename, 'wb')as file:
+            file.write(response.content)
+        assert os.path.exists(zipfilename)
+        assert shasum(zipfilename) == \
+               'd19ca933d974c371a48896c7dce61c005780953c21fe88bb9a95382d8ef22904'
+        return True
+    return False
 
 
 def unpack_zip(zipfilename: str, datafilename: str) -> None:
@@ -200,12 +245,63 @@ def unpack_zip(zipfilename: str, datafilename: str) -> None:
     fail if the file does not exist at the end.
 
     """
-    # TODO: Extract the datafile and store it to disk in the current
     # directory. Note: The output file is nearly 400M
-
+    with zipfile.ZipFile(zipfilename) as zip:
+        for zip_info in zip.infolist():
+            if zip_info.filename == zipfilename.split(".")[0] + "/" + datafilename:
+                zip_info.filename = os.path.basename(zip_info.filename)
+                zip.extract(zip_info, os.getcwd())
     assert os.path.exists(datafilename)
     assert shasum(datafilename) == \
-        'dfbd5253f3f21f0569b34f2d1f47fbb71f5324ed26c3debbe29e84d42ce6d563'
+           'dfbd5253f3f21f0569b34f2d1f47fbb71f5324ed26c3debbe29e84d42ce6d563'
+
+
+def create_mysql_connection():
+    try:
+        mysql_connection = mysql.connector.connect(host=DBPARAMS.get('host'),
+                                                   user=DBPARAMS.get('user'),
+                                                   password=DBPARAMS.get('password'))
+        return mysql_connection
+    except mysql.connector.Error as e:
+        print("Error while connecting to MySQL", e)
+
+
+def create_database(cursor, dbname: str) -> None:
+    try:
+        cursor.execute(
+            "CREATE DATABASE IF NOT EXISTS {}".format(dbname))
+        print("The database {} created successfully.".format(dbname))
+    except mysql.connector.Error as error:
+        print("Failed to create the database: {}".format(error))
+        exit(1)
+
+
+def create_table(cursor, tablename: str) -> None:
+    column_definitions_str = ", ".join(map(" ".join, COLUMN_DEFINITIONS))
+    sql = f"""CREATE TABLE IF NOT EXISTS {tablename} (
+                {column_definitions_str}
+    )"""
+    try:
+        print("Creating table {}".format(tablename))
+        print(sql)
+        cursor.execute(sql)
+    except mysql.connector.Error as err:
+        print(err)
+
+
+def batch_csv(datafilename: str, size=1000):
+    values_to_check = ['NONE', 'NULL']
+    with open(datafilename) as csv_file:
+        csv_reader = csv.reader(csv_file, delimiter='\t')
+        csv_headings = next(csv_reader)
+        batch = []
+        for row in csv_reader:
+            row = [None if v in values_to_check else v for v in row]
+            batch.append(row)
+            if len(batch) == size:
+                yield batch
+                del batch[:]
+        yield batch
 
 
 def send_to_database(datafilename: str, dbname: str, tablename: str) -> None:
@@ -213,10 +309,28 @@ def send_to_database(datafilename: str, dbname: str, tablename: str) -> None:
     server.
 
     """
-    # TODO: send data to the database
-
-    # TODO: any necessary preparations on the data after loading, and before
-    # running the queries to come.
+    connection = create_mysql_connection()
+    cursor = connection.cursor()
+    create_database(cursor, dbname)
+    try:
+        cursor.execute("USE {}".format(dbname))
+        cursor.execute(create_table(cursor, tablename))
+        print("The table {} is created.".format(tablename))
+        sql = f"""INSERT INTO {tablename} VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,
+        %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,
+        %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,
+        %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,
+        %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,
+        %s,%s,%s,%s,%s,%s,%s,%s,%s,%s)"""
+        batch_data = batch_csv(datafilename)
+        for batch in batch_data:
+            cursor.executemany(sql, batch)
+            connection.commit()
+    except mysql.connector.Error as error:
+        print(error)
+    finally:
+        cursor.close()
+        connection.close()
 
 
 def total_record_count(dbname: str, tablename: str,
@@ -224,7 +338,22 @@ def total_record_count(dbname: str, tablename: str,
     """
     Write out the count of records that exist in this table to resultfilename
     """
-    # TODO: query for count of records, write to file
+    try:
+        connection = create_mysql_connection()
+        cursor = connection.cursor()
+        cursor.execute("USE {}".format(dbname))
+        cursor.execute("SELECT count(*) from {}".format(tablename))
+        result = cursor.fetchone()
+        number_of_rows = result[0]
+
+        with open(resultfilename, 'w') as file:
+            writer = csv.writer(file, quoting=csv.QUOTE_ALL)
+            writer.writerow([number_of_rows])
+
+        cursor.close()
+        connection.close()
+    except mysql.connector.Error as error:
+        print(error)
     assert os.path.exists(resultfilename)
     assert compare_results(resultfilename)
 
@@ -236,7 +365,27 @@ def times_by_country(dbname: str, tablename: str, resultfilename: str) -> None:
     country code
 
     """
-    # TODO: Create the results file that shows the average time per country
+
+    try:
+        connection = create_mysql_connection()
+        cursor = connection.cursor()
+        cursor.execute("USE {}".format(dbname))
+        sql_query = f"""
+            select country as country_code, avg(ifnull(testelapse,0)) average_number_seconds from {tablename} 
+            where country is not null group by 1 order by 1;
+        """
+        cursor.execute(sql_query)
+        result = cursor.fetchall()
+
+        with open(resultfilename, 'w') as file:
+            writer = csv.writer(file, quoting=csv.QUOTE_ALL)
+            for row in result:
+                writer.writerow(row)
+        cursor.close()
+        connection.close()
+    except mysql.connector.Error as error:
+        print(error)
+
     assert os.path.exists(resultfilename)
     assert compare_results(resultfilename)
 
@@ -250,9 +399,31 @@ def uniques_by_country(dbname: str, tablename: str,
     columns: country_code and count of unique visitors.
 
     """
-    # TODO: create the results file for the unique visitors per country
+    try:
+        connection = create_mysql_connection()
+        cursor = connection.cursor()
+        cursor.execute("USE {}".format(dbname))
+        sql_query = f"""
+            select country as country_code, count(*) count_unique_visitors from {tablename} 
+            where ipc=1 group by 1 having count(*)>=10000 order by 2 desc;
+        """
+        cursor.execute(sql_query)
+        result = cursor.fetchall()
+
+        with open(resultfilename, 'w') as file:
+            writer = csv.writer(file, quoting=csv.QUOTE_ALL)
+            for row in result:
+                writer.writerow(row)
+        cursor.close()
+        connection.close()
+    except mysql.connector.Error as error:
+        print(error)
+
     assert os.path.exists(resultfilename)
     assert compare_results(resultfilename)
+    assert os.path.exists(resultfilename)
+    assert compare_results(resultfilename)
+
 
 def make_classes():
     """You will make three classes here inside of this function.
@@ -300,6 +471,7 @@ def make_classes():
     assert j2.results == 5.5
     assert jobs == [j1, j2]
 
+
 def main():
     """This is the method that is responsible for actually running the
     program. Feel free to modify it to suit your needs if the above
@@ -314,15 +486,15 @@ def main():
     countsfile = "counts.csv"
     country_times_file = "country_times.csv"
     country_uniques_file = "country_uniques.csv"
-
-    download_zip(url, zipfilename)
-    unpack_zip(zipfilename, datafilename)
-    send_to_database(datafilename, dbname, tablename)
-    total_record_count(dbname, tablename, countsfile)
-    times_by_country(dbname, tablename, country_times_file)
-    uniques_by_country(dbname, tablename, country_uniques_file)
-
-    make_classes()
+    if download_zip(url, zipfilename):
+        unpack_zip(zipfilename, datafilename)
+        send_to_database(datafilename, dbname, tablename)
+        total_record_count(dbname, tablename, countsfile)
+        times_by_country(dbname, tablename, country_times_file)
+        uniques_by_country(dbname, tablename, country_uniques_file)
+        make_classes()
+    else:
+        print("The zip file doesn't exist at the specified url " + url)
 
 
 if __name__ == '__main__':
